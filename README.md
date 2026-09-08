@@ -2,10 +2,16 @@
 
 Agent backend for a guided phone finder. The API returns structured intents, never prose.
 The browser client lives in its own repo,
-[phone-finder-ui](https://github.com/Hatfek/phone-finder-ui), and talks to this over HTTP with
-an API key.
+[phone-finder-ui](https://github.com/Hatfek/phone-finder-ui), and talks to this over plain HTTP.
 
 LangGraph (orchestration) · LangSmith (observability) · Ollama (local LLM) · FastAPI (transport).
+
+## Scope
+
+**This server has no authentication.** It is built for personal, local use — anything that can
+reach the port can create, read, answer and delete every thread. Do not expose it to the public
+internet. If you run it anywhere but `localhost`, put your own network control in front of it: a
+VPN, an SSH tunnel, a firewall rule, or a reverse proxy that authenticates.
 
 ## Setup
 
@@ -49,29 +55,12 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
-`.env` is gitignored and is the only place a key belongs. It carries 21 settings. Two of them
-have no usable default and must be set before the server will serve anything: **`API_KEYS`**
-(empty fails closed, `503`) and **`CORS_ORIGINS`** (empty allows no origin, and `.env.example`
-ships a placeholder that matches nothing). The rest run as-is.
+`.env` is gitignored and is the only place a key belongs. It carries 28 settings. One of them
+has no usable default and must be set before a browser client can talk to the server:
+**`CORS_ORIGINS`** (empty allows no origin, and `.env.example` ships a placeholder that matches
+nothing). The rest run as-is.
 
-### 3. Generate API keys
-
-Every `/threads` route requires a key. Generate one per client:
-
-```bash
-python -c "import secrets; print(secrets.token_urlsafe(32))"
-```
-
-Put them in `.env`, comma-separated:
-
-```bash
-API_KEYS=kA9x...,mQ2z...
-```
-
-**An empty `API_KEYS` fails closed** — every authenticated route returns `503`, never an open
-server. Rotating is a restart: add the new key, hand it out, drop the old one.
-
-### 4. Tavily (optional, but it is the difference between one source and several)
+### 3. Tavily (optional, but it is the difference between one source and several)
 
 Without `TAVILY_API_KEY` the search node skips the provider and hits retailer search pages
 directly — Amazon responds, most others block, so results come from one source. A free key at
@@ -83,7 +72,7 @@ TAVILY_API_KEY=tvly-your-key-here
 
 A failing or absent provider degrades to the retailer fallback rather than ending the turn.
 
-### 5. Run
+### 4. Run
 
 ```bash
 python run.py            # honours DEBUG for reload
@@ -91,7 +80,7 @@ python run.py            # honours DEBUG for reload
 uvicorn app.server:app --reload
 ```
 
-`GET /health` is public and reports which model the process picked up:
+`GET /health` reports which model the process picked up:
 
 ```bash
 curl -s localhost:8000/health
@@ -100,45 +89,6 @@ curl -s localhost:8000/health
 The browser client is a separate repo — see
 [phone-finder-ui](https://github.com/Hatfek/phone-finder-ui) — and set `CORS_ORIGINS` to the
 origin it is served from.
-
-## Authentication
-
-Every `/threads` route requires a key from `API_KEYS`. `GET /health` stays public so a client
-can probe the server before it has one.
-
-### Sending the key
-
-Either header works:
-
-```bash
-curl -s localhost:8000/threads \
-  -H 'x-api-key: YOUR_KEY' \
-  -H 'content-type: application/json' \
-  -d '{"profile":"I drive all day, rarely near a charger."}'
-
-curl -s localhost:8000/threads \
-  -H 'authorization: Bearer YOUR_KEY' \
-  -H 'content-type: application/json' \
-  -d '{"profile":"..."}'
-```
-
-Keys are compared with `hmac.compare_digest`, so the comparison is constant-time.
-
-### Rotating keys
-
-`API_KEYS` is a comma-separated list, so rotation needs no downtime: add the new key, restart,
-hand it out, then remove the old one and restart again.
-
-### What a failure looks like
-
-| Situation | Response |
-|---|---|
-| No key presented | `401 {"detail": "missing api key"}` |
-| Key not in `API_KEYS` | `401 {"detail": "invalid api key"}` |
-| `API_KEYS` empty or unset | `503 {"detail": "authentication is not configured"}` |
-
-Every failure is logged at `WARNING` with the client IP, method and path. A rejected key is
-logged as a **SHA-256 fingerprint, never the key itself**, so logs stay safe to share.
 
 ## API
 
@@ -155,11 +105,11 @@ logged as a **SHA-256 fingerprint, never the key itself**, so logs stay safe to 
 
 ```bash
 curl -s localhost:8000/threads \
-  -H 'x-api-key: YOUR_KEY' -H 'content-type: application/json' \
+  -H 'content-type: application/json' \
   -d '{"profile":"I drive all day, rarely near a charger, I photograph equipment."}'
 
 curl -s localhost:8000/threads/$ID/answer \
-  -H 'x-api-key: YOUR_KEY' -H 'content-type: application/json' \
+  -H 'content-type: application/json' \
   -d '{"answer":"Android"}'
 ```
 
@@ -399,14 +349,15 @@ re-extracted on every turn, and that LLM pass is most of the turn's latency.
 | 14 | An unreachable model falls back to canned questions and unranked results | `structured.py`, `nodes.plan`, `nodes.annotate` |
 | 15 | A node exception or turn timeout returns the thread's state, never a 500 | `server._run` |
 | 16 | An answer to a stalled thread finishes the stalled run instead of being eaten | `server.answer` |
-| 17 | Every `/threads` route requires a key; empty `API_KEYS` fails closed | `auth.require_api_key` |
-| 18 | Keys compared in constant time; rejected keys logged as a fingerprint | `auth.require_api_key` |
-| 19 | Global per-IP ceiling (100/min) on top of the 10/min turn limit | `server.guard_request` |
-| 20 | Bodies over `MAX_REQUEST_BYTES` (10MB) refused with `413` before parsing | `server.guard_request` |
-| 21 | Outbound fetches restricted to `ALLOWED_DOMAINS`, every redirect hop re-checked | `net.assert_safe_url` |
-| 22 | Any host resolving to a private, loopback or link-local address is refused | `net.is_blocked_ip` |
-| 23 | Redirects off by default; when on, the whole chain shares a 10s budget and 5-hop cap | `net.safe_get` |
-| 24 | Free text NFKC-normalised, control and zero-width characters stripped | `api_models.sanitize_text` |
+| 17 | Global per-IP ceiling (100/min) on top of the 10/min turn limit | `server.guard_request` |
+| 18 | Bodies over `MAX_REQUEST_BYTES` (10MB) refused with `413` before parsing | `server.guard_request` |
+| 19 | Outbound fetches restricted to `ALLOWED_DOMAINS`, every redirect hop re-checked | `net.assert_safe_url` |
+| 20 | Any host resolving to a private, loopback or link-local address is refused | `net.is_blocked_ip` |
+| 21 | Redirects off by default; when on, the whole chain shares a 10s budget and 5-hop cap | `net.safe_get` |
+| 22 | Free text NFKC-normalised, control and zero-width characters stripped | `api_models.sanitize_text` |
+
+There is no authentication row: the server has none. Every guard above is independent of who is
+calling — see [Scope](#scope).
 
 ## Degrading instead of failing
 
@@ -450,7 +401,6 @@ outside that file's defaults.
 |---|---|
 | Model | `OLLAMA_MODEL`, `OLLAMA_MODEL_QUALITY`, `OLLAMA_BASE_URL`, `LLM_REASONING` |
 | Search | `TAVILY_API_KEY` |
-| Auth | `API_KEYS` |
 | SSRF | `ALLOWED_DOMAINS`, `DISABLE_REDIRECTS` |
 | Observability | `LANGSMITH_TRACING`, `LANGSMITH_API_KEY`, `LANGSMITH_PROJECT`, `LANGSMITH_ENDPOINT` |
 | Storage | `DATABASE_URL`, `CHECKPOINT_DB`, `CACHE_TTL_HOURS` |
@@ -484,15 +434,14 @@ failure does, and nothing is cached.
 ### CORS
 
 `CORS_ORIGINS` is a comma-separated allow-list of real origins. There is no wildcard, no
-`allow_credentials`, and only `GET`/`POST`/`DELETE` are permitted. `x-api-key` and
-`authorization` are in `allow_headers`, which is what lets the separate UI origin authenticate
-at all — a same-origin deployment would not need them.
+`allow_credentials`, only `GET`/`POST`/`DELETE` are permitted, and `content-type` is the only
+allowed request header — the client sends no credentials of any kind.
 
 **`CORS_ORIGINS` has no default and must be set explicitly.** Unset, it is empty, the allow-list
-is empty, and the browser blocks every cross-origin call — the same fail-closed stance
-`API_KEYS` takes. A missing setting refuses traffic rather than quietly serving an origin
-nobody chose. `.env.example` ships the placeholder `https://your-frontend-domain.example`,
-which matches nothing, so it fails loudly instead of appearing to work.
+is empty, and the browser blocks every cross-origin call. A missing setting refuses traffic
+rather than quietly serving an origin nobody chose. `.env.example` ships the placeholder
+`https://your-frontend-domain.example`, which matches nothing, so it fails loudly instead of
+appearing to work.
 
 Set it to the actual origin the UI is served from — `http://localhost:5500` for the local
 static server, the real HTTPS origin in production.
@@ -506,8 +455,8 @@ Two limits, both per client IP, both applied:
 | `RATE_LIMIT_REQUESTS` / `RATE_LIMIT_WINDOW_SECONDS` | the four turn-running routes | 10 per 60s |
 | `GLOBAL_RATE_LIMIT_REQUESTS` / `GLOBAL_RATE_LIMIT_WINDOW_SECONDS` | every route | 100 per 60s |
 
-The global ceiling stops a valid key from hammering the cheap routes; the turn limit protects
-the expensive ones. A valid key is not a licence for unlimited thread creation.
+The global ceiling stops a client from hammering the cheap routes; the turn limit protects the
+expensive ones. Both are per IP and are the only abuse control the server has.
 
 The IP comes from the socket, not `X-Forwarded-For`, so behind a proxy both limits are
 per-proxy until that header is explicitly trusted.
@@ -516,12 +465,13 @@ per-proxy until that header is explicitly trusted.
 
 ### Threat model
 
-This service is designed to sit behind a key on the public internet, serving a browser client on
-another origin. It assumes the operator controls `API_KEYS` and `ALLOWED_DOMAINS`, and that
-Ollama is **not** publicly reachable.
+This service is designed for personal, local use — bound to a machine the operator controls,
+serving a browser client on that same machine. **It is unauthenticated and must not be exposed
+to the public internet.** It assumes the operator controls `ALLOWED_DOMAINS`, that Ollama is
+**not** publicly reachable, and that network access to the port is already restricted.
 
-What is protected: unauthenticated access to every thread route, outbound requests to internal
-addresses, oversized bodies, per-IP flooding, and log leakage of keys.
+What is protected: outbound requests to internal addresses, oversized bodies, per-IP flooding,
+and cross-origin access from origins outside `CORS_ORIGINS`. Who is calling is not.
 
 ### Known limitations
 
@@ -530,11 +480,9 @@ Read these before deploying — they are real and currently unmitigated.
 | Limitation | Impact | Status |
 |---|---|---|
 | **DNS rebinding.** `assert_safe_url` resolves the host, checks the addresses, then httpx resolves again when it connects. An attacker controlling DNS with a sub-TTL record could return a public address to the check and a private one to the connection. | Narrow TOCTOU window on outbound fetches | Open. Fix is pinning the connection to the validated IP with a custom transport |
-| **`thread_id` is an IDOR.** Ids are 48 bits of `uuid4` hex and carry no ownership. Any valid key can read, reset or delete any thread whose id it guesses or observes. | A key is trusted for all threads, not its own | Open. Needs per-key thread ownership |
-| **`ResetRequest.profile` can overwrite a thread's profile.** Combined with the above, a key can rewrite another thread's starting profile. | Same blast radius as the IDOR | Open |
-| **No per-key rate limiting.** Limits are per IP, so many keys behind one IP share a budget, and one key across many IPs gets many budgets. | Coarse abuse control | Open |
+| **No authentication at all.** Any client that can reach this server can create, read, answer and delete every thread. Do not expose it to the public internet. | Full access to every thread for anyone who reaches the port | By design — personal/local use only. Restrict access at the network layer |
 | **Prompt injection.** Retailer page text reaches the model. `sanitize_text` covers client input, not fetched pages. | A hostile page could influence extraction | Partly mitigated: prices must appear literally on the page, and results are schema-validated |
-| **No auth on `GET /health`.** Deliberate, so a client can probe before holding a key. It discloses the model name and price reference. | Minor information disclosure | By design |
+| **`GET /health` discloses the model name and price reference.** Deliberate, so a client can probe the server before starting a thread. | Minor information disclosure | By design |
 
 ### Reporting a vulnerability
 
@@ -544,11 +492,11 @@ Open a private security advisory on the repository rather than a public issue.
 
 ```bash
 ruff check .          # line-length 100, config in ruff.toml
-python -m pytest -q   # 153 tests, ~0.6s
+python -m pytest -q   # 149 tests, ~0.6s
 ```
 
 The suite is pure logic plus a `TestClient` driven against a fake graph, so it needs **no
-Ollama, no keys and no network** — which is exactly what `.github/workflows/ci.yml` runs on
+Ollama and no network** — which is exactly what `.github/workflows/ci.yml` runs on
 every push and pull request (Python 3.11, `ruff check` then `pytest`).
 
 ### Gates

@@ -18,7 +18,6 @@ from app.api_models import (
     StartRequest,
     TurnResponse,
 )
-from app.auth import client_ip, require_api_key
 from app.config import get_settings
 from app.fallbacks import SLOT_LABELS, revision_questions
 from app.graph import get_graph
@@ -39,11 +38,17 @@ app.add_middleware(
     allow_origins=settings.cors_origin_list,
     allow_credentials=False,
     allow_methods=["GET", "POST", "DELETE"],
-    allow_headers=["content-type", "x-api-key", "authorization"],
+    allow_headers=["content-type"],
     max_age=600,
 )
 
 ThreadId = Annotated[str, Path(pattern=THREAD_ID_PATTERN)]
+
+
+def client_ip(request: Request) -> str:
+    client = request.client
+    return client.host if client else "unknown"
+
 
 _limiter = RateLimiter(settings.rate_limit_requests, settings.rate_limit_window_seconds)
 _global_limiter = RateLimiter(
@@ -57,7 +62,7 @@ async def guard_request(request: Request, call_next):
     """Caps the body at MAX_REQUEST_BYTES and applies the global per-IP ceiling.
 
     The ceiling is separate from, and looser than, the per-turn limit below: it stops a
-    valid key from hammering the cheap routes without touching the turn budget.
+    client from hammering the cheap routes without touching the turn budget.
     """
     length = request.headers.get("content-length")
     if length is not None:
@@ -91,7 +96,6 @@ def rate_limit(request: Request) -> None:
 
 
 TurnLimit = Depends(rate_limit)
-Authenticated = Depends(require_api_key)
 
 
 def _config(thread_id: str) -> dict:
@@ -168,11 +172,10 @@ async def health() -> dict:
         "price_reference": settings.price_reference,
         "checkpointer": checkpointer,
         "debug_ui": settings.debug_ui,
-        "auth_required": True,
     }
 
 
-@app.post("/threads", response_model=TurnResponse, dependencies=[Authenticated, TurnLimit])
+@app.post("/threads", response_model=TurnResponse, dependencies=[TurnLimit])
 async def start_thread(body: StartRequest) -> TurnResponse:
     thread_id = uuid.uuid4().hex[:12]
     state, pending, degraded = await _run(thread_id, {"profile": body.profile})
@@ -182,7 +185,7 @@ async def start_thread(body: StartRequest) -> TurnResponse:
 @app.post(
     "/threads/{thread_id}/answer",
     response_model=TurnResponse,
-    dependencies=[Authenticated, TurnLimit],
+    dependencies=[TurnLimit],
 )
 async def answer(thread_id: ThreadId, body: AnswerRequest) -> TurnResponse:
     state, pending = await _snapshot(thread_id)
@@ -201,7 +204,7 @@ async def answer(thread_id: ThreadId, body: AnswerRequest) -> TurnResponse:
 @app.post(
     "/threads/{thread_id}/revise",
     response_model=TurnResponse,
-    dependencies=[Authenticated, TurnLimit],
+    dependencies=[TurnLimit],
 )
 async def revise_thread(thread_id: ThreadId, body: ReviseRequest) -> TurnResponse:
     """Change one earlier answer without losing the ones that came after it.
@@ -245,7 +248,7 @@ async def slots() -> SlotCatalogue:
 @app.post(
     "/threads/{thread_id}/reset",
     response_model=TurnResponse,
-    dependencies=[Authenticated, TurnLimit],
+    dependencies=[TurnLimit],
 )
 async def reset_thread(thread_id: ThreadId, body: ResetRequest | None = None) -> TurnResponse:
     state, _ = await _snapshot(thread_id)
@@ -261,13 +264,13 @@ async def reset_thread(thread_id: ThreadId, body: ResetRequest | None = None) ->
     return to_response(thread_id, state, bool(pending), degraded)
 
 
-@app.get("/threads/{thread_id}", response_model=TurnResponse, dependencies=[Authenticated])
+@app.get("/threads/{thread_id}", response_model=TurnResponse)
 async def get_thread(thread_id: ThreadId) -> TurnResponse:
     state, pending = await _snapshot(thread_id)
     return to_response(thread_id, state, bool(pending))
 
 
-@app.delete("/threads/{thread_id}", status_code=204, dependencies=[Authenticated])
+@app.delete("/threads/{thread_id}", status_code=204)
 async def delete_thread(thread_id: ThreadId) -> None:
     graph = await get_graph()
     if graph.checkpointer is not None:

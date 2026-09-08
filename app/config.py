@@ -34,7 +34,6 @@ class Settings(BaseSettings):
     global_rate_limit_window_seconds: float = 60.0
     max_concurrent_turns: int = 4
     max_request_bytes: int = 10 * 1024 * 1024
-    api_keys: str = ""
     allowed_domains: str = (
         "amazon.com,bestbuy.com,bhphotovideo.com,gsmarena.com,"
         "store.google.com,apple.com,samsung.com,walmart.com"

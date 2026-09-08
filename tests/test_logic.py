@@ -4,7 +4,6 @@ sys.path.insert(0, ".")
 
 import asyncio
 import ipaddress
-import logging
 import re
 
 import httpx
@@ -22,9 +21,8 @@ from app.api_models import (
     StartRequest,
     sanitize_text,
 )
-from app.auth import fingerprint
 from app.brands import detect_brands, matches_brands
-from app.config import Settings, get_settings
+from app.config import Settings
 from app.fallbacks import SLOT_LABELS, price_options, revision_questions
 from app.limits import RateLimited, RateLimiter, ThreadBusy, TooManyTurns, TurnGuard
 from app.net import UnsafeURL, assert_safe_url, is_blocked_ip
@@ -769,32 +767,11 @@ class _FakeGraph:
         return _FakeSnapshot(values, self.pending)
 
 
-TEST_API_KEY = "test-key-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-OTHER_API_KEY = "test-key-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-
-
 @pytest.fixture
-def _keys(monkeypatch):
-    """Configures API_KEYS through the real Settings path, not by patching the check."""
-    monkeypatch.setenv("API_KEYS", f"{TEST_API_KEY},{OTHER_API_KEY}")
-    get_settings.cache_clear()
-    yield
-    get_settings.cache_clear()
-
-
-@pytest.fixture
-def anon_client(monkeypatch, _keys):
-    """A client that sends no key. Every /threads route must refuse it."""
+def client(monkeypatch):
     monkeypatch.setattr(server, "_limiter", RateLimiter(1000, 60.0))
     monkeypatch.setattr(server, "_global_limiter", RateLimiter(1000, 60.0))
     return TestClient(server.app)
-
-
-@pytest.fixture
-def client(monkeypatch, _keys):
-    monkeypatch.setattr(server, "_limiter", RateLimiter(1000, 60.0))
-    monkeypatch.setattr(server, "_global_limiter", RateLimiter(1000, 60.0))
-    return TestClient(server.app, headers={"x-api-key": TEST_API_KEY})
 
 
 @pytest.mark.parametrize("debug_ui", [False, True])
@@ -1145,94 +1122,30 @@ def test_the_slot_catalogue_covers_every_revisable_filter(client):
     assert all(s["label"] and s["question"] and len(s["options"]) >= 2 for s in slots)
 
 
-def test_every_thread_route_refuses_a_request_with_no_key(anon_client, monkeypatch):
+def test_every_thread_route_is_reachable_without_credentials(client, monkeypatch):
+    """The server carries no authentication: nothing is asked of the caller."""
+
     async def get_graph():
         return _FakeGraph(("ask",))
 
     monkeypatch.setattr(server, "get_graph", get_graph)
-
-    calls = (
-        ("post", "/threads", {"profile": "I want a camera phone"}),
-        ("post", "/threads/0123456789ab/answer", {"answer": "Android"}),
-        ("post", "/threads/0123456789ab/revise", {"slot": "brands"}),
-        ("post", "/threads/0123456789ab/reset", {}),
-        ("get", "/threads/0123456789ab", None),
-        ("delete", "/threads/0123456789ab", None),
-    )
-    for method, path, body in calls:
-        response = getattr(anon_client, method)(path, **({"json": body} if body else {}))
-        assert response.status_code == 401, f"{method} {path} was not refused"
-        assert response.json()["detail"] == "missing api key"
-
-
-def test_a_wrong_key_is_refused_and_a_configured_one_is_not(anon_client, monkeypatch):
-    async def get_graph():
-        return _FakeGraph(("ask",))
-
-    monkeypatch.setattr(server, "get_graph", get_graph)
-
-    bad = anon_client.post(
-        "/threads", json={"profile": "x"}, headers={"x-api-key": "not-a-real-key"}
-    )
-    assert bad.status_code == 401
-    assert bad.json()["detail"] == "invalid api key"
-
-    good = anon_client.post(
-        "/threads", json={"profile": "I want a camera phone"}, headers={"x-api-key": OTHER_API_KEY}
-    )
-    assert good.status_code == 200
-
-
-def test_a_bearer_token_is_accepted_as_well_as_the_header(anon_client, monkeypatch):
-    async def get_graph():
-        return _FakeGraph(("ask",))
-
-    monkeypatch.setattr(server, "get_graph", get_graph)
-    response = anon_client.post(
-        "/threads",
-        json={"profile": "I want a camera phone"},
-        headers={"authorization": f"Bearer {TEST_API_KEY}"},
-    )
+    response = client.post("/threads", json={"profile": "I want a camera phone"})
 
     assert response.status_code == 200
+    assert response.json()["ask_question"]["slot"] == "os"
 
 
-def test_an_empty_api_keys_fails_closed_rather_than_disabling_auth(monkeypatch):
-    monkeypatch.setenv("API_KEYS", "")
-    get_settings.cache_clear()
-    monkeypatch.setattr(server, "_limiter", RateLimiter(1000, 60.0))
-    monkeypatch.setattr(server, "_global_limiter", RateLimiter(1000, 60.0))
-
-    try:
-        with TestClient(server.app) as unconfigured:
-            response = unconfigured.post("/threads", json={"profile": "x"})
-        assert response.status_code == 503
-        assert response.json()["detail"] == "authentication is not configured"
-    finally:
-        get_settings.cache_clear()
-
-
-def test_health_stays_public_so_the_client_can_probe_it(anon_client):
-    response = anon_client.get("/health")
+def test_health_reports_the_backend_without_a_key(client):
+    response = client.get("/health")
 
     assert response.status_code == 200
-    assert response.json()["auth_required"] is True
+    assert response.json()["status"] in {"ok", "degraded"}
 
 
-def test_an_auth_failure_is_logged_with_a_fingerprint_and_never_the_key(anon_client, caplog):
-    with caplog.at_level(logging.WARNING, logger="app.auth"):
-        anon_client.post("/threads", json={"profile": "x"}, headers={"x-api-key": "sekrit-key"})
-
-    logged = "\n".join(record.getMessage() for record in caplog.records)
-    assert "auth failure" in logged
-    assert "sekrit-key" not in logged
-    assert fingerprint("sekrit-key") in logged
-
-
-def test_the_global_ceiling_is_separate_from_the_turn_limit(monkeypatch, _keys):
+def test_the_global_ceiling_is_separate_from_the_turn_limit(monkeypatch):
     monkeypatch.setattr(server, "_limiter", RateLimiter(1000, 60.0))
     monkeypatch.setattr(server, "_global_limiter", RateLimiter(2, 60.0))
-    limited = TestClient(server.app, headers={"x-api-key": TEST_API_KEY})
+    limited = TestClient(server.app)
 
     assert limited.get("/health").status_code == 200
     assert limited.get("/health").status_code == 200

@@ -1,8 +1,9 @@
 # phone-finder-api
 
 Agent backend for a guided phone finder. The API returns structured intents, never prose.
-The browser client lives in its own repo, **phone-finder-ui** (link added after publishing),
-and talks to this over HTTP with an API key.
+The browser client lives in its own repo,
+[phone-finder-ui](https://github.com/Hatfek/phone-finder-ui), and talks to this over HTTP with
+an API key.
 
 LangGraph (orchestration) · LangSmith (observability) · Ollama (local LLM) · FastAPI (transport).
 
@@ -96,8 +97,9 @@ uvicorn app.server:app --reload
 curl -s localhost:8000/health
 ```
 
-The browser client is a separate repo — see **phone-finder-ui** (link added after
-publishing) — and set `CORS_ORIGINS` to the origin it is served from.
+The browser client is a separate repo — see
+[phone-finder-ui](https://github.com/Hatfek/phone-finder-ui) — and set `CORS_ORIGINS` to the
+origin it is served from.
 
 ## Authentication
 

@@ -1,0 +1,35 @@
+# Secrets
+.env
+*.pem
+*.key
+
+# Runtime state — the WAL holds user profiles
+state.db
+state.db-shm
+state.db-wal
+*.sqlite
+*.sqlite3
+
+# Working notes — never public
+SESSION_NOTES.md
+*.session-notes.md
+
+# Screenshots not referenced by the README
+*.png
+!docs/img/*.png
+
+# Caches
+.cache/
+.pytest_cache/
+.ruff_cache/
+__pycache__/
+*.pyc
+
+.venv/
+venv/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+.playwright-mcp/

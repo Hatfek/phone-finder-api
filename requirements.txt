@@ -1,0 +1,17 @@
+aiosqlite
+fastapi
+httpx
+langchain-core
+langchain-ollama
+langgraph
+langgraph-checkpoint-sqlite
+langsmith
+pydantic
+pydantic-settings
+pytest
+pytest-asyncio
+python-dotenv
+ruff
+selectolax
+tavily-python
+uvicorn
